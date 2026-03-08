@@ -9,6 +9,7 @@ export const userSession = new UserSession({ appConfig });
 type WalletContextType = {
   isLoggedIn: boolean;
   userData: UserData | null;
+  userSession: UserSession;
   connect: () => void;
   disconnect: () => void;
 };
@@ -53,7 +54,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <WalletContext.Provider value={{ isLoggedIn, userData, connect, disconnect }}>
+    <WalletContext.Provider value={{ isLoggedIn, userData, userSession, connect, disconnect }}>
       {children}
     </WalletContext.Provider>
   );

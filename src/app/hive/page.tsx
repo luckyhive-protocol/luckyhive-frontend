@@ -1,37 +1,101 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useWallet } from '@/components/providers/wallet-provider';
 import { Button } from '@/components/ui/button';
 import { Coins, ArrowDownCircle, ArrowUpCircle, AlertCircle } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { fetchCallReadOnlyFunction, cvToJSON, uintCV, standardPrincipalCV } from '@stacks/transactions';
+import { openContractCall } from '@stacks/connect';
+import { PRIZE_POOL_CONTRACT, STACKS_NETWORK, GET_HIVE_STATS_FUNCTION, GET_USER_DEPOSIT_FUNCTION, STORE_IN_HIVE_FUNCTION, LEAVE_HIVE_FUNCTION } from '@/lib/stacks';
 
 export default function HiveDashboard() {
-  const { isLoggedIn, connect } = useWallet();
+  const { isLoggedIn, connect, userData } = useWallet();
   const [activeTab, setActiveTab] = useState<'deposit' | 'withdraw'>('deposit');
   const [amount, setAmount] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
+  
+  const [balance, setBalance] = useState<number>(0);
+  const [twab, setTwab] = useState<number>(0);
+  const [poolYield, setPoolYield] = useState<number>(0);
 
-  // Mock data for frontend build out
-  const balance = 1050.50;
-  const twab = 840.25;
-  const poolYield = 45000;
+  const fetchStats = useCallback(async () => {
+    if (!userData) return;
+    try {
+      const [contractAddress, contractName] = PRIZE_POOL_CONTRACT.split('.');
 
-  const handleTransaction = () => {
+      // Fetch user deposit
+      const userDepositResponse = await fetchCallReadOnlyFunction({
+        network: STACKS_NETWORK,
+        contractAddress,
+        contractName,
+        functionName: GET_USER_DEPOSIT_FUNCTION,
+        functionArgs: [standardPrincipalCV(userData.profile.stxAddress.testnet)],
+        senderAddress: userData.profile.stxAddress.testnet,
+      });
+      const depositVal = cvToJSON(userDepositResponse).value?.value?.amount?.value || 0;
+      setBalance(Number(depositVal) / 1000000); // MicroSTX to STX
+
+      // Fetch total stats
+      const statsResponse = await fetchCallReadOnlyFunction({
+        network: STACKS_NETWORK,
+        contractAddress,
+        contractName,
+        functionName: GET_HIVE_STATS_FUNCTION,
+        functionArgs: [],
+        senderAddress: userData.profile.stxAddress.testnet,
+      });
+      const statsObj = cvToJSON(statsResponse).value?.value || {};
+      const yieldVal = statsObj['total-yield']?.value || 0;
+      setPoolYield(Number(yieldVal) / 1000000);
+      
+      // We will use user deposit as an approximation for TWAB for now for the frontend
+      setTwab(Number(depositVal) / 1000000);
+
+    } catch (error) {
+      console.error('Error fetching hive stats:', error);
+    }
+  }, [userData]);
+
+  useEffect(() => {
+    if (isLoggedIn) {
+      fetchStats();
+    }
+  }, [isLoggedIn, fetchStats]);
+
+  const handleTransaction = async () => {
     if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
       toast.error('Please enter a valid amount');
       return;
     }
 
-    setIsProcessing(true);
+    const microStxAmount = Math.floor(Number(amount) * 1000000);
+    const [contractAddress, contractName] = PRIZE_POOL_CONTRACT.split('.');
     
-    // Simulate transaction delay
-    setTimeout(() => {
+    setIsProcessing(true);
+    try {
+      await openContractCall({
+        network: STACKS_NETWORK,
+        contractAddress,
+        contractName,
+        functionName: activeTab === 'deposit' ? STORE_IN_HIVE_FUNCTION : LEAVE_HIVE_FUNCTION,
+        functionArgs: [uintCV(microStxAmount)],
+        onFinish: (data) => {
+          toast.success(`Transaction submitted! TXID: ${data.txId.substring(0, 8)}...`);
+          setAmount('');
+          setTimeout(fetchStats, 5000); // Re-fetch after a short pause
+        },
+        onCancel: () => {
+          toast.error('Transaction cancelled');
+        }
+      });
+    } catch (e) {
+      console.error(e);
+      toast.error('Error opening contract call');
+    } finally {
       setIsProcessing(false);
-      toast.success(`Successfully ${activeTab === 'deposit' ? 'deposited to' : 'withdrawn from'} the Hive!`);
-      setAmount('');
-    }, 2000);
+    }
   };
 
   const containerVariants = {
