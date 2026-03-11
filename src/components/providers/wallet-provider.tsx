@@ -1,60 +1,98 @@
 'use client';
 
 import { ReactNode, useState, useEffect, createContext, useContext } from 'react';
-import { AppConfig, UserSession, showConnect, UserData } from '@stacks/connect';
-
-const appConfig = new AppConfig(['store_write', 'publish_data']);
-export const userSession = new UserSession({ appConfig });
+import {
+  connect as connectV8,
+  disconnect as disconnectV8,
+  isConnected,
+  getLocalStorage,
+} from '@stacks/connect';
+import { toast } from 'react-hot-toast';
 
 type WalletContextType = {
   isLoggedIn: boolean;
-  userData: UserData | null;
-  userSession: UserSession;
+  stxAddress: string;
   connect: () => void;
   disconnect: () => void;
 };
 
 const WalletContext = createContext<WalletContextType | undefined>(undefined);
 
+/**
+ * Extracts the STX address from the @stacks/connect v8 local storage data.
+ * Falls back to empty string if unavailable.
+ */
+function getStoredStxAddress(): string {
+  const stored = getLocalStorage();
+  if (stored?.addresses?.stx?.length) {
+    return stored.addresses.stx[0].address;
+  }
+  return '';
+}
+
 export function WalletProvider({ children }: { children: ReactNode }) {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [userData, setUserData] = useState<UserData | null>(null);
+  const [stxAddress, setStxAddress] = useState('');
 
+  // Restore session from local storage on mount
   useEffect(() => {
-    if (userSession.isSignInPending()) {
-      userSession.handlePendingSignIn().then((data) => {
-        setUserData(data);
+    if (typeof window === 'undefined') return;
+
+    if (isConnected()) {
+      const addr = getStoredStxAddress();
+      if (addr) {
+        setStxAddress(addr);
         setIsLoggedIn(true);
-      });
-    } else if (userSession.isUserSignedIn()) {
-      setUserData(userSession.loadUserData());
-      setIsLoggedIn(true);
+      }
     }
   }, []);
 
-  const connect = () => {
-    showConnect({
-      appDetails: {
-        name: 'LuckyHive',
-        icon: window.location.origin + '/logo.png',
-      },
-      redirectTo: '/',
-      onFinish: () => {
-        setUserData(userSession.loadUserData());
+  const connect = async () => {
+    try {
+      const result = await connectV8({
+        forceWalletSelect: false,
+        persistWalletSelect: true,
+        enableLocalStorage: true,
+      });
+
+      let address = '';
+      if (result?.addresses?.length) {
+        const stxEntry = result.addresses.find(
+          (a) => a.symbol === 'STX' || a.address.startsWith('ST') || a.address.startsWith('SP')
+        );
+        address = stxEntry?.address || result.addresses[0]?.address || '';
+      }
+
+      // Fallback to local storage if address not in response
+      if (!address) {
+        address = getStoredStxAddress();
+      }
+
+      if (address) {
+        setStxAddress(address);
         setIsLoggedIn(true);
-      },
-      userSession,
-    });
+        const shortAddress = `${address.substring(0, 4)}...${address.substring(address.length - 5)}`;
+        toast.success(`Wallet Connected: ${shortAddress}`, {
+          style: { borderRadius: '10px', background: '#333', color: '#fff' },
+        });
+      }
+    } catch (error) {
+      console.error('Wallet connection failed:', error);
+      toast.error('Failed to connect wallet');
+    }
   };
 
   const disconnect = () => {
-    userSession.signUserOut('/');
-    setUserData(null);
+    disconnectV8();
+    setStxAddress('');
     setIsLoggedIn(false);
+    toast.success('Wallet Disconnected', {
+      style: { borderRadius: '10px', background: '#333', color: '#fff' },
+    });
   };
 
   return (
-    <WalletContext.Provider value={{ isLoggedIn, userData, userSession, connect, disconnect }}>
+    <WalletContext.Provider value={{ isLoggedIn, stxAddress, connect, disconnect }}>
       {children}
     </WalletContext.Provider>
   );
