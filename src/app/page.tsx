@@ -12,6 +12,8 @@ import { PRIZE_POOL_CONTRACT, STACKS_NETWORK } from '@/lib/stacks';
 export default function Home() {
   const { connect, isLoggedIn } = useWallet();
   const [totalYield, setTotalYield] = useState<number>(0);
+  const [totalDeposits, setTotalDeposits] = useState<number>(0);
+  const [totalBees, setTotalBees] = useState<number>(0);
 
   useEffect(() => {
     async function fetchTotalYield() {
@@ -28,6 +30,10 @@ export default function Home() {
         const statsObj = cvToJSON(statsResponse).value?.value || {};
         const yieldVal = statsObj['total-yield']?.value || 0;
         setTotalYield(Number(yieldVal) / 1000000);
+        const depositsVal = statsObj['total-deposits']?.value || 0;
+        setTotalDeposits(Number(depositsVal) / 1000000);
+        const beesVal = statsObj['total-bees']?.value || 0;
+        setTotalBees(Number(beesVal));
       } catch (e) {
         console.error("Failed to fetch total yield", e);
       }
@@ -87,6 +93,26 @@ export default function Home() {
               <span className="text-lucky-orange font-bold">STX</span>
             </div>
             <span className="text-sm text-gray-400 mt-1">in total yield so far</span>
+          </motion.div>
+        )}
+
+        {/* Pool Stats */}
+        {(totalDeposits > 0 || totalBees > 0) && (
+          <motion.div variants={itemVariants} className="mb-10 flex flex-wrap gap-6 items-center justify-center">
+            {totalDeposits > 0 && (
+              <div className="glass-panel px-6 py-3 text-center">
+                <span className="text-xs text-gray-500 uppercase tracking-wider block mb-0.5">Total Value Locked</span>
+                <span className="text-2xl font-mono font-bold text-white">{totalDeposits.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
+                <span className="text-lucky-orange font-bold ml-1">STX</span>
+              </div>
+            )}
+            {totalBees > 0 && (
+              <div className="glass-panel px-6 py-3 text-center">
+                <span className="text-xs text-gray-500 uppercase tracking-wider block mb-0.5">Active Bees</span>
+                <span className="text-2xl font-mono font-bold text-white">{totalBees.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+                <span className="text-lucky-orange font-bold ml-1">participants</span>
+              </div>
+            )}
           </motion.div>
         )}
 

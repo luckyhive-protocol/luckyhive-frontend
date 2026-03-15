@@ -10,7 +10,8 @@ export default function DocsPage() {
 
   const containerVariants = {
     hidden: { opacity: 0 },
-    visible: { opacity: 1, transition: { staggerChildren: 0.1 } }
+    visible: { opacity: 1, transition: { staggerChildren: 0.1 } },
+    exit: { opacity: 0, transition: { duration: 0.2 } }
   };
 
   const itemVariants = {
@@ -50,10 +51,10 @@ export default function DocsPage() {
         {!showAdvanced ? (
           <motion.div
             key="simple"
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -10 }}
-            transition={{ duration: 0.3 }}
+            variants={containerVariants}
+            initial="hidden"
+            animate="visible"
+            exit="exit"
             className="space-y-8"
           >
             <motion.div variants={itemVariants} className="glass-panel p-8">
@@ -92,7 +93,7 @@ export default function DocsPage() {
                   <h3 className="text-2xl font-bold text-white mb-3">3. Provably Fair Weekly Draws</h3>
                   <p className="text-gray-400 leading-relaxed mb-4">
                     Periodically (roughly every week, based on Stacks block headers), the pooled yield is awarded to a randomly selected winner.
-                    The process is 100% transparent and runs completely on-chain via the <code>prize-pool.clar</code> and <code>auction-manager.clar</code> contracts.
+                    The process is 100% transparent and runs completely on-chain via the <code>luckyhive-prize-pool.clar</code> and <code>luckyhive-auction-manager.clar</code> contracts.
                   </p>
                   <div className="bg-lucky-dark/50 rounded-xl p-4 border border-lucky-border/30">
                     <h4 className="text-white font-medium mb-2">How are the odds calculated?</h4>
@@ -109,10 +110,10 @@ export default function DocsPage() {
         ) : (
           <motion.div
             key="advanced"
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -10 }}
-            transition={{ duration: 0.3 }}
+            variants={containerVariants}
+            initial="hidden"
+            animate="visible"
+            exit="exit"
             className="space-y-8"
           >
             <div className="mb-4">
@@ -167,7 +168,7 @@ export default function DocsPage() {
                 <div>
                   <h3 className="text-2xl font-bold text-white mb-3">Time-Weighted Average Balance (TWAB) Security</h3>
                   <p className="text-gray-400 leading-relaxed mb-4">
-                    The protocol implements a comprehensive ring-buffer data structure within the <code>twab-controller.clar</code> to record state snapshots of user balances over time. 
+                    The protocol implements a comprehensive ring-buffer data structure within the <code>luckyhive-twab-controller.clar</code> to record state snapshots of user balances over time. 
                     This guarantees flash-loan resistance. Malicious actors cannot deposit large sums of capital directly prior to a drawing block, as their time-locked weight will register near zero. The mathematical fairness protects both the Swarm and long-term Queen Bee liquidity providers.
                   </p>
                 </div>

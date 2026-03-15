@@ -4,12 +4,12 @@ import { useEffect, useState, useCallback, Suspense } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useWallet } from '@/components/providers/wallet-provider';
 import { Button } from '@/components/ui/button';
-import { Coins, ArrowDownCircle, ArrowUpCircle, AlertCircle, Copy, Check } from 'lucide-react';
+import { Coins, ArrowDownCircle, ArrowUpCircle, AlertCircle, Copy, Check, Clock, Users, PauseCircle, ShieldCheck, ShieldAlert, Link2 } from 'lucide-react';
 import toast from 'react-hot-toast';
-import { fetchCallReadOnlyFunction, cvToJSON, uintCV, noneCV, someCV, standardPrincipalCV, principalCV } from '@stacks/transactions';
-import { openContractCall } from '@stacks/connect';
+import { fetchCallReadOnlyFunction, cvToJSON, uintCV, noneCV, someCV, standardPrincipalCV } from '@stacks/transactions';
+import { request } from '@stacks/connect';
 import { useSearchParams } from 'next/navigation';
-import { PRIZE_POOL_CONTRACT, STACKS_NETWORK, GET_HIVE_STATS_FUNCTION, GET_USER_DEPOSIT_FUNCTION, STORE_IN_HIVE_FUNCTION, LEAVE_HIVE_FUNCTION } from '@/lib/stacks';
+import { PRIZE_POOL_CONTRACT, TWAB_CONTROLLER_CONTRACT, STACKS_NETWORK, HIRO_API_URL, IS_MAINNET, GET_HIVE_STATS_FUNCTION, GET_USER_DEPOSIT_FUNCTION, STORE_IN_HIVE_FUNCTION, LEAVE_HIVE_FUNCTION, CHECK_SOLVENCY_FUNCTION, GET_REFERRAL_INFO_FUNCTION } from '@/lib/stacks';
 
 import { ExternalLink } from 'lucide-react';
 import Leaderboard from '@/components/hive/leaderboard';
@@ -27,15 +27,24 @@ export default function HiveDashboard() {
 }
 
 function HiveDashboardContent() {
-  const { isLoggedIn, connect, userData } = useWallet();
+  const { isLoggedIn, connect, stxAddress } = useWallet();
   const searchParams = useSearchParams();
   const [activeTab, setActiveTab] = useState<'deposit' | 'withdraw'>('deposit');
   const [amount, setAmount] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
+  const MIN_DEPOSIT_STX = 1; // Matches contract min-deposit of u1000000 microSTX
   
   const [balance, setBalance] = useState<number>(0);
   const [twab, setTwab] = useState<number>(0);
   const [walletBalance, setWalletBalance] = useState<number>(0);
+  const [totalPoolDeposits, setTotalPoolDeposits] = useState<number>(0);
+  const [totalBees, setTotalBees] = useState<number>(0);
+  const [nextDrawBlock, setNextDrawBlock] = useState<number>(0);
+  const [currentBlockHeight, setCurrentBlockHeight] = useState<number>(0);
+  const [isPaused, setIsPaused] = useState<boolean>(false);
+  const [isSolvent, setIsSolvent] = useState<boolean>(true);
+  const [referrer, setReferrer] = useState<string | null>(null);
+  const [referralBoost, setReferralBoost] = useState<number>(0);
   
   interface Transaction {
     id: string;
@@ -47,16 +56,20 @@ function HiveDashboardContent() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [copied, setCopied] = useState(false);
 
+  // Estimate time remaining until next draw (~10 min per block on Stacks)
+  const blocksUntilDraw = Math.max(0, nextDrawBlock - currentBlockHeight);
+  const minutesUntilDraw = blocksUntilDraw * 10;
+  const hoursUntilDraw = Math.floor(minutesUntilDraw / 60);
+  const remainingMinutes = minutesUntilDraw % 60;
+
   const fetchStats = useCallback(async () => {
-    if (!userData) return;
+    if (!stxAddress) return;
     try {
       const [contractAddress, contractName] = PRIZE_POOL_CONTRACT.split('.');
+      const [twabContractAddress, twabContractName] = TWAB_CONTROLLER_CONTRACT.split('.');
+      const userAddress = stxAddress;
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const isMainnet = (STACKS_NETWORK as any).chainId === 1;
-      const userAddress = isMainnet ? userData.profile.stxAddress.mainnet : userData.profile.stxAddress.testnet;
-
-      // Fetch user deposit
+      // Fetch user deposit from prize pool contract
       const userDepositResponse = await fetchCallReadOnlyFunction({
         network: STACKS_NETWORK,
         contractAddress,
@@ -67,10 +80,27 @@ function HiveDashboardContent() {
       });
       const parsedDeposit = cvToJSON(userDepositResponse);
       const depositVal = parsedDeposit?.value?.value?.amount?.value || parsedDeposit?.value?.amount?.value || 0;
-      setBalance(Number(depositVal) / 1000000); // MicroSTX to STX
+      setBalance(Number(depositVal) / 1000000);
 
-      // Fetch total stats (Keep the call to verify it's working if needed, but not assigning to unused variables)
-      await fetchCallReadOnlyFunction({
+      // Fetch real TWAB from twab-controller contract
+      try {
+        const twabResponse = await fetchCallReadOnlyFunction({
+          network: STACKS_NETWORK,
+          contractAddress: twabContractAddress,
+          contractName: twabContractName,
+          functionName: 'get-current-balance',
+          functionArgs: [standardPrincipalCV(userAddress)],
+          senderAddress: userAddress,
+        });
+        const twabVal = cvToJSON(twabResponse)?.value?.value || 0;
+        setTwab(Number(twabVal) / 1000000);
+      } catch {
+        // Fallback to deposit value if TWAB call fails
+        setTwab(Number(depositVal) / 1000000);
+      }
+
+      // Fetch pool-wide stats from get-hive-stats
+      const statsResponse = await fetchCallReadOnlyFunction({
         network: STACKS_NETWORK,
         contractAddress,
         contractName,
@@ -78,26 +108,66 @@ function HiveDashboardContent() {
         functionArgs: [],
         senderAddress: userAddress,
       });
-      
-      // We will use user deposit as an approximation for TWAB for now for the frontend
-      setTwab(Number(depositVal) / 1000000);
+      const statsObj = cvToJSON(statsResponse)?.value?.value || cvToJSON(statsResponse)?.value || {};
+      setTotalPoolDeposits(Number(statsObj['total-deposits']?.value || 0) / 1000000);
+      setTotalBees(Number(statsObj['total-bees']?.value || 0));
+      setNextDrawBlock(Number(statsObj['next-draw-block']?.value || 0));
+      setIsPaused(statsObj['is-paused']?.value === true);
 
-      // Fetch actual wallet STX balance from Hiro API
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const apiUrl = (STACKS_NETWORK as any).baseUrl;
-      const balanceResponse = await fetch(`${apiUrl}/extended/v1/address/${userAddress}/balances`);
+      // Fetch solvency status
+      try {
+        const solvencyResponse = await fetchCallReadOnlyFunction({
+          network: STACKS_NETWORK,
+          contractAddress,
+          contractName,
+          functionName: CHECK_SOLVENCY_FUNCTION,
+          functionArgs: [],
+          senderAddress: userAddress,
+        });
+        const solvencyObj = cvToJSON(solvencyResponse)?.value?.value || {};
+        setIsSolvent(solvencyObj['is-solvent']?.value !== false);
+      } catch {
+        // Default to solvent if check fails
+      }
+
+      // Fetch referral info for this user
+      try {
+        const refResponse = await fetchCallReadOnlyFunction({
+          network: STACKS_NETWORK,
+          contractAddress,
+          contractName,
+          functionName: GET_REFERRAL_INFO_FUNCTION,
+          functionArgs: [standardPrincipalCV(userAddress)],
+          senderAddress: userAddress,
+        });
+        const refData = cvToJSON(refResponse)?.value?.value;
+        if (refData) {
+          setReferrer(refData.referrer?.value || null);
+          setReferralBoost(Number(refData.boost?.value || 0) / 1000000);
+        }
+      } catch {
+        // No referral for this user
+      }
+
+      // Fetch current block height from Hiro API
+      const infoResponse = await fetch(`${HIRO_API_URL}/v2/info`);
+      if (infoResponse.ok) {
+        const infoData = await infoResponse.json();
+        setCurrentBlockHeight(infoData.stacks_tip_height || 0);
+      }
+
+      // Fetch wallet STX balance from Hiro API
+      const balanceResponse = await fetch(`${HIRO_API_URL}/extended/v1/address/${userAddress}/balances`);
       if (balanceResponse.ok) {
         const balanceData = await balanceResponse.json();
         const availableStx = balanceData?.stx?.balance || '0';
         setWalletBalance(Number(availableStx) / 1000000);
       }
       
-      // Fetch transaction history
-      const txsResponse = await fetch(`${apiUrl}/extended/v1/address/${userAddress}/transactions?limit=10`);
+      // Fetch transaction history from Hiro API
+      const txsResponse = await fetch(`${HIRO_API_URL}/extended/v1/address/${userAddress}/transactions?limit=20`);
       if (txsResponse.ok) {
         const txsData = await txsResponse.json();
-        // Filter out for our specific contract calls if we want to, 
-        // but here we just show their general activity focused on our contract.
         const relevantTxs = txsData.results
           .filter((tx: { tx_type: string; contract_call?: { contract_id: string } }) => 
             tx.tx_type === 'contract_call' && tx.contract_call?.contract_id === PRIZE_POOL_CONTRACT
@@ -115,11 +185,13 @@ function HiveDashboardContent() {
     } catch (error) {
       console.error('Error fetching hive stats:', error);
     }
-  }, [userData]);
+  }, [stxAddress]);
 
   useEffect(() => {
     if (isLoggedIn) {
       fetchStats();
+      const interval = setInterval(fetchStats, 30000);
+      return () => clearInterval(interval);
     }
   }, [isLoggedIn, fetchStats]);
 
@@ -129,78 +201,97 @@ function HiveDashboardContent() {
       return;
     }
 
+    if (activeTab === 'deposit' && Number(amount) < MIN_DEPOSIT_STX) {
+      toast.error(`Minimum deposit is ${MIN_DEPOSIT_STX} STX`, { style: { borderRadius: '10px', background: '#333', color: '#fff' }});
+      return;
+    }
+
+    if (activeTab === 'withdraw' && Number(amount) > balance) {
+      toast.error(`Insufficient balance. Your deposit is ${balance.toLocaleString()} STX`, { style: { borderRadius: '10px', background: '#333', color: '#fff' }});
+      return;
+    }
+
     const microStxAmount = Math.floor(Number(amount) * 1000000);
-    const [contractAddress, contractName] = PRIZE_POOL_CONTRACT.split('.');
     
     // Parse referral from URL if present
     const refParam = searchParams.get('ref');
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let referrerCV: any = noneCV();
     
-    if (activeTab === 'deposit' && refParam && refParam.startsWith('ST')) {
-      // Basic validation for Stacks address to prevent UI crash
-      try {
-        referrerCV = someCV(principalCV(refParam));
-      } catch (e) {
-        console.warn('Invalid referrer address format', e);
+    let functionArgs;
+    
+    if (activeTab === 'deposit') {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let referrerCV: any = noneCV();
+      if (refParam && refParam.startsWith('ST')) {
+        try {
+          referrerCV = someCV(standardPrincipalCV(refParam));
+        } catch (e) {
+          console.warn('Invalid referrer address format', e);
+        }
       }
+      functionArgs = [uintCV(microStxAmount), referrerCV];
+    } else {
+      functionArgs = [uintCV(microStxAmount)];
     }
     
     setIsProcessing(true);
+    const toastId = toast.loading('Waiting for wallet approval...', { style: { borderRadius: '10px', background: '#333', color: '#fff' } });
     try {
-      await openContractCall({
-        network: STACKS_NETWORK,
-        contractAddress,
-        contractName,
+      const response = await request('stx_callContract', {
+        network: IS_MAINNET ? 'mainnet' : 'testnet',
+        contract: PRIZE_POOL_CONTRACT,
         functionName: activeTab === 'deposit' ? STORE_IN_HIVE_FUNCTION : LEAVE_HIVE_FUNCTION,
-        functionArgs: activeTab === 'deposit' 
-          ? [uintCV(microStxAmount), referrerCV] 
-          : [uintCV(microStxAmount)],
-        onFinish: (data) => {
-          toast.success(`Transaction submitted! TXID: ${data.txId.substring(0, 8)}...`);
-          
-          // Optimistically update the UI to reflect the pending/successful transaction
-          const numAmount = Number(amount);
-          if (activeTab === 'deposit') {
-            setBalance(prev => prev + numAmount);
-            setTwab(prev => prev + numAmount);
-            setWalletBalance(prev => Math.max(0, prev - numAmount));
-          } else {
-            setBalance(prev => Math.max(0, prev - numAmount));
-            setTwab(prev => Math.max(0, prev - numAmount));
-            setWalletBalance(prev => prev + numAmount);
-          }
-          
-          // Optimistically show the tx in the list
-          const newTx = {
-            id: data.txId,
-            status: 'pending',
-            type: activeTab === 'deposit' ? 'Deposit' : 'Withdraw',
-            timestamp: new Date().toISOString()
-          };
-          setTransactions(prev => [newTx, ...prev.slice(0, 9)]);
-          
-          setAmount('');
-          setTimeout(fetchStats, 10000); // Re-fetch after a short pause to ensure network sync
-        },
-        onCancel: () => {
-          toast.error('Transaction cancelled');
-        }
+        functionArgs,
+        postConditionMode: 'allow',
       });
-    } catch (e) {
-      console.error(e);
-      toast.error('Error opening contract call');
+
+      if (response && response.txid) {
+        toast.dismiss(toastId);
+        toast.success(`Transaction Broadcasted! TXID: ${response.txid.substring(0, 8)}...`, { duration: 5000, style: { borderRadius: '10px', background: '#333', color: '#fff' }});
+        
+        // Optimistically update the UI to reflect the pending transaction
+        const numAmount = Number(amount);
+        if (activeTab === 'deposit') {
+          setBalance(prev => prev + numAmount);
+          setTwab(prev => prev + numAmount);
+          setWalletBalance(prev => Math.max(0, prev - numAmount));
+        } else {
+          setBalance(prev => Math.max(0, prev - numAmount));
+          setTwab(prev => Math.max(0, prev - numAmount));
+          setWalletBalance(prev => prev + numAmount);
+        }
+        
+        // Optimistically show the tx in the list
+        const newTx = {
+          id: response.txid,
+          status: 'pending',
+          type: activeTab === 'deposit' ? 'Deposit' : 'Withdraw',
+          timestamp: new Date().toISOString()
+        };
+        setTransactions(prev => [newTx, ...prev.slice(0, 9)]);
+        
+        setAmount('');
+        setTimeout(fetchStats, 10000); // Re-fetch after a short pause to ensure network sync
+      } else {
+        toast.dismiss(toastId);
+        // User cancelled popup via the new api returns no txid or throws
+      }
+    } catch (e: unknown) {
+      toast.dismiss(toastId);
+      const msg = e instanceof Error ? e.message : '';
+      if (msg.toLowerCase().includes('cancel')) {
+        toast.error('Transaction cancelled by user', { style: { borderRadius: '10px', background: '#333', color: '#fff' }});
+      } else {
+        console.error(e);
+        toast.error('Error opening contract call', { style: { borderRadius: '10px', background: '#333', color: '#fff' }});
+      }
     } finally {
       setIsProcessing(false);
     }
   };
 
   const copyReferralLink = () => {
-    if (!userData) return;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const isMainnet = (STACKS_NETWORK as any).chainId === 1;
-    const userAddress = isMainnet ? userData.profile.stxAddress.mainnet : userData.profile.stxAddress.testnet;
-    const link = `${window.location.origin}/hive?ref=${userAddress}`;
+    if (!stxAddress) return;
+    const link = `${window.location.origin}/hive?ref=${stxAddress}`;
     
     navigator.clipboard.writeText(link);
     setCopied(true);
@@ -235,11 +326,52 @@ function HiveDashboardContent() {
       initial="hidden"
       animate="visible"
     >
+      {/* Paused Banner */}
+      {isPaused && (
+        <div className="mb-6 p-4 bg-red-900/30 border border-red-500/50 rounded-xl flex items-center gap-3">
+          <PauseCircle className="w-6 h-6 text-red-400 flex-shrink-0" />
+          <div>
+            <p className="text-red-300 font-semibold">Contract Paused</p>
+            <p className="text-red-400/70 text-sm">Deposits and withdrawals are temporarily disabled. Your funds are safe.</p>
+          </div>
+        </div>
+      )}
+
       <div className="flex items-center justify-between mb-8">
         <h1 className="text-4xl font-display font-bold text-white">Your Hive</h1>
         <div className="flex items-center gap-2 px-4 py-2 glass-panel !rounded-full">
           <div className="w-2 h-2 rounded-full bg-lucky-accent animate-pulse"></div>
           <span className="text-sm font-medium text-lucky-accent">Live</span>
+        </div>
+      </div>
+
+      {/* Pool-wide Stats Bar */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+        <div className="glass-panel p-4 text-center">
+          <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">Total Pool</p>
+          <p className="text-lg font-bold text-white">{totalPoolDeposits.toLocaleString(undefined, { maximumFractionDigits: 2 })} <span className="text-lucky-orange text-sm">STX</span></p>
+        </div>
+        <div className="glass-panel p-4 text-center">
+          <div className="flex items-center justify-center gap-1 mb-1">
+            <Users className="w-3 h-3 text-gray-500" />
+            <p className="text-xs text-gray-500 uppercase tracking-wider">Total Bees</p>
+          </div>
+          <p className="text-lg font-bold text-white">{totalBees.toLocaleString(undefined, { maximumFractionDigits: 0 })}</p>
+        </div>
+        <div className="glass-panel p-4 text-center">
+          <div className="flex items-center justify-center gap-1 mb-1">
+            <Clock className="w-3 h-3 text-gray-500" />
+            <p className="text-xs text-gray-500 uppercase tracking-wider">Next Draw</p>
+          </div>
+          <p className="text-lg font-bold text-white">
+            {blocksUntilDraw > 0 ? `${hoursUntilDraw}h ${remainingMinutes}m` : 'Imminent'}
+          </p>
+        </div>
+        <div className="glass-panel p-4 text-center">
+          <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">Your Share</p>
+          <p className="text-lg font-bold text-white">
+            {totalPoolDeposits > 0 ? `${((balance / totalPoolDeposits) * 100).toFixed(2)}%` : '0%'}
+          </p>
         </div>
       </div>
 
@@ -277,8 +409,19 @@ function HiveDashboardContent() {
           <div className="glass-panel p-6 relative overflow-hidden group">
             <div className="absolute top-0 right-0 w-32 h-32 bg-lucky-orange/5 rounded-full blur-2xl -mt-10 -mr-10 group-hover:bg-lucky-orange/10 transition-colors"></div>
             <h3 className="text-gray-400 text-sm font-medium mb-4">Hive Invites</h3>
+            {referrer && (
+              <div className="mb-3 p-2.5 bg-lucky-accent/10 border border-lucky-accent/20 rounded-lg">
+                <div className="flex items-center gap-2 text-xs text-lucky-accent">
+                  <Link2 className="w-3.5 h-3.5" />
+                  <span>Referred by <span className="font-mono">{referrer.substring(0, 5)}...{referrer.substring(referrer.length - 4)}</span></span>
+                </div>
+                {referralBoost > 0 && (
+                  <p className="text-xs text-lucky-accent/70 mt-1 pl-5">+{referralBoost.toLocaleString()} TWAB boost applied</p>
+                )}
+              </div>
+            )}
             <p className="text-xs text-gray-500 mb-4">
-              Invite friends to the hive. Both you and your friend get a **5% boost** to your TWAB points on every deposit.
+              Invite friends to the hive. Both you and your friend get a 5% boost to your TWAB points on every deposit.
             </p>
             <Button 
               onClick={copyReferralLink}
@@ -327,6 +470,23 @@ function HiveDashboardContent() {
                 )}
               </AnimatePresence>
             </Button>
+           </div>
+
+          {/* Solvency Indicator */}
+          <div className="glass-panel p-4">
+            <div className="flex items-center gap-3">
+              {isSolvent ? (
+                <ShieldCheck className="w-5 h-5 text-green-400" />
+              ) : (
+                <ShieldAlert className="w-5 h-5 text-red-400" />
+              )}
+              <div>
+                <p className="text-sm font-medium text-white">Protocol Health</p>
+                <p className={`text-xs ${isSolvent ? 'text-green-400' : 'text-red-400'}`}>
+                  {isSolvent ? 'Solvent - All funds backed' : 'Warning - Check solvency'}
+                </p>
+              </div>
+            </div>
           </div>
 
           <Leaderboard />
@@ -406,15 +566,23 @@ function HiveDashboardContent() {
                           </button>
                         </div>
                       </div>
+                      {activeTab === 'deposit' && (
+                        <p className="text-xs text-gray-500 mt-1.5 pl-1">Minimum deposit: {MIN_DEPOSIT_STX} STX</p>
+                      )}
                     </div>
 
                     <Button 
                       onClick={handleTransaction} 
-                      disabled={isProcessing}
+                      disabled={isProcessing || isPaused}
                       className={`w-full py-6 text-lg group ${activeTab === 'withdraw' ? 'variant-outline' : ''}`}
                       variant={activeTab === 'withdraw' ? 'outline' : 'default'}
                     >
-                      {activeTab === 'deposit' ? (
+                      {isPaused ? (
+                        <>
+                          <PauseCircle className="mr-2 w-5 h-5" />
+                          Contract Paused
+                        </>
+                      ) : activeTab === 'deposit' ? (
                         <>
                           Deposit STX
                           <ArrowDownCircle className="ml-2 w-5 h-5 group-hover:translate-y-1 transition-transform" />
@@ -487,9 +655,7 @@ function HiveDashboardContent() {
                         size="sm" 
                         className="h-8 w-8 p-0"
                         onClick={() => {
-                          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                          const isMainnet = (STACKS_NETWORK as any).chainId === 1;
-                          window.open(`https://explorer.hiro.so/txid/${tx.id}?chain=${isMainnet ? 'mainnet' : 'testnet'}`, '_blank');
+                          window.open(`https://explorer.hiro.so/txid/${tx.id}?chain=${IS_MAINNET ? 'mainnet' : 'testnet'}`, '_blank');
                         }}
                       >
                         <ExternalLink className="w-4 h-4 text-gray-400 hover:text-white" />
@@ -507,7 +673,18 @@ function HiveDashboardContent() {
             <p>No previous hive interactions found.</p>
             <p className="text-sm mt-1 opacity-70">Deposit STX to start earning and increasing your winning odds.</p>
           </div>
-        )}
+       )}
+
+      {/* Solvency Warning */}
+      {!isSolvent && (
+        <div className="mb-6 p-4 bg-red-900/30 border border-red-500/50 rounded-xl flex items-center gap-3">
+          <ShieldAlert className="w-6 h-6 text-red-400 flex-shrink-0" />
+          <div>
+            <p className="text-red-300 font-semibold">Solvency Warning</p>
+            <p className="text-red-400/70 text-sm">Contract balance is below expected obligations. Contact the team.</p>
+          </div>
+        </div>
+      )}
       </div>
     </motion.div>
   );
