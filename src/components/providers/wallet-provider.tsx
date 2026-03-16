@@ -55,11 +55,12 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       };
 
       const result = await connectV8({
+        // @ts-expect-error appDetails not typed in v8 GetAddressesParams but works
         appDetails,
         forceWalletSelect: false,
         persistWalletSelect: true,
         enableLocalStorage: true,
-      } as any);
+      });
 
       let address = '';
       if (result?.addresses?.length) {
