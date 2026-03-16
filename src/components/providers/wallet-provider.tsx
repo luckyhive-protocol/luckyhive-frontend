@@ -59,7 +59,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         forceWalletSelect: false,
         persistWalletSelect: true,
         enableLocalStorage: true,
-      });
+      } as any);
 
       let address = '';
       if (result?.addresses?.length) {
